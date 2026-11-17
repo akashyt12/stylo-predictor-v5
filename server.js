@@ -1,25 +1,176 @@
-// Minimal .env loader (no dependency) — must run before modules read process.env.
-(function loadEnv() {
-  try {
-    const fs = require('fs');
-    const p = require('path').join(__dirname, '.env');
-    if (!fs.existsSync(p)) return;
-    fs.readFileSync(p, 'utf8').split(/\r?\n/).forEach(function (line) {
-      const m = line.match(/^\s*([A-Z0-9_]+)\s*=\s*(.*)\s*$/i);
-      if (!m) return;
-      let v = m[2].trim();
-      if ((v.startsWith('"') && v.endsWith('"')) || (v.startsWith("'") && v.endsWith("'"))) v = v.slice(1, -1);
-      if (process.env[m[1]] === undefined) process.env[m[1]] = v;
-    });
-  } catch (e) { /* ignore */ }
-})();
-
-const path = require('path');
-const crypto = require('crypto');
 const express = require('express');
-const { load, save, backendName } = require('./lib/store');
-const { sign, verify, sha256, genKey, safeEqual, rateLimit } = require('./lib/auth');
+const path = require('path');
+const fs = require('fs');
+const crypto = require('crypto');
 
+// ---------------- INLINED AUTH & CRYPTO HELPERS ----------------
+const SECRET = process.env.SESSION_SECRET || 'stylo_fortress_v5_default_hmac_secret_2026_998877';
+
+function b64url(buf) {
+  return Buffer.from(buf).toString('base64').replace(/\+/g, '-').replace(/\//g, '_').replace(/=+$/, '');
+}
+function fromB64url(str) {
+  str = str.replace(/-/g, '+').replace(/_/g, '/');
+  while (str.length % 4) str += '=';
+  return Buffer.from(str, 'base64').toString('utf8');
+}
+function sign(payload, ttlMs) {
+  const body = Object.assign({}, payload, { iat: Date.now(), exp: Date.now() + ttlMs });
+  const data = b64url(JSON.stringify(body));
+  const sig = crypto.createHmac('sha256', SECRET).update(data).digest('hex');
+  return data + '.' + sig;
+}
+function verify(token) {
+  if (!token || typeof token !== 'string' || token.indexOf('.') < 0) return null;
+  const idx = token.lastIndexOf('.');
+  const data = token.slice(0, idx);
+  const sig = token.slice(idx + 1);
+  const expect = crypto.createHmac('sha256', SECRET).update(data).digest('hex');
+  const a = Buffer.from(sig, 'utf8');
+  const b = Buffer.from(expect, 'utf8');
+  if (a.length !== b.length || !crypto.timingSafeEqual(a, b)) return null;
+  let payload;
+  try { payload = JSON.parse(fromB64url(data)); } catch (e) { return null; }
+  if (!payload.exp || Date.now() > payload.exp) return null;
+  return payload;
+}
+function sha256(str) {
+  return crypto.createHash('sha256').update(str).digest('hex');
+}
+const ALPHABET = 'ABCDEFGHJKLMNPQRSTUVWXYZ23456789';
+function genKey() {
+  const pick = () => ALPHABET[crypto.randomInt(0, ALPHABET.length)];
+  const groups = [];
+  for (let g = 0; g < 3; g++) {
+    let s = '';
+    for (let i = 0; i < 4; i++) s += pick();
+    groups.push(s);
+  }
+  return 'WG-' + groups.join('-');
+}
+function safeEqual(a, b) {
+  const ab = Buffer.from(String(a));
+  const bb = Buffer.from(String(b));
+  if (ab.length !== bb.length) return false;
+  return crypto.timingSafeEqual(ab, bb);
+}
+const buckets = new Map();
+function rateLimit(ip, name, max, windowMs) {
+  const key = name + ':' + ip;
+  const now = Date.now();
+  let b = buckets.get(key);
+  if (!b || now > b.reset) { b = { count: 0, reset: now + windowMs }; buckets.set(key, b); }
+  b.count++;
+  const ok = b.count <= max;
+  const retry = Math.ceil((b.reset - now) / 1000);
+  return { ok, remaining: Math.max(0, max - b.count), retry };
+}
+
+// ---------------- INLINED STORAGE (REDIS / FIREBASE / VERCEL TMP) ----------------
+const IS_VERCEL = !!process.env.VERCEL || !!process.env.AWS_LAMBDA_FUNCTION_NAME;
+const DATA_DIR = process.env.DATA_DIR || (IS_VERCEL ? '/tmp/stylo_data' : path.join(__dirname, 'data'));
+const FILE = path.join(DATA_DIR, 'db.json');
+const UPSTASH_URL = process.env.UPSTASH_REDIS_REST_URL || '';
+const UPSTASH_TOKEN = process.env.UPSTASH_REDIS_REST_TOKEN || '';
+const USE_REDIS = !!(UPSTASH_URL && UPSTASH_TOKEN);
+const REDIS_KEY = process.env.REDIS_KEY || 'wingo_db';
+const FB_URL = (process.env.FIREBASE_DB_URL || '').replace(/\/+$/, '');
+const FB_PATH = (process.env.FIREBASE_DB_PATH || 'wingo_oracle/db').replace(/^\/+|\/+$/g, '');
+const USE_FB = !USE_REDIS && !!FB_URL;
+
+let cache = null;
+let writeChain = Promise.resolve();
+
+function defaultDB() {
+  const now = Date.now();
+  const demoRaw = 'WG-STYL-O202-6PRO';
+  return {
+    keys: [
+      {
+        id: 'k_vip_default',
+        hash: sha256(demoRaw),
+        last4: '6PRO',
+        plan: 'year',
+        note: 'Master VIP Pass (WG-STYL-O202-6PRO)',
+        created: now,
+        expires: now + 365 * 24 * 60 * 60 * 1000,
+        revoked: false,
+        boundFp: null,
+        lastIp: null,
+        firstUsed: null,
+        lastSeen: null,
+        hits: 0
+      }
+    ],
+    meta: { created: now }
+  };
+}
+
+async function redis(cmd) {
+  const res = await fetch(UPSTASH_URL, {
+    method: 'POST',
+    headers: { Authorization: 'Bearer ' + UPSTASH_TOKEN, 'Content-Type': 'application/json' },
+    body: JSON.stringify(cmd)
+  });
+  if (!res.ok) throw new Error('Redis error ' + res.status);
+  return res.json();
+}
+async function fbGet() {
+  const r = await fetch(FB_URL + '/' + FB_PATH + '.json', { headers: { 'Cache-Control': 'no-cache' } });
+  if (!r.ok) throw new Error('Firebase GET ' + r.status);
+  const txt = await r.text();
+  return txt && txt !== 'null' ? JSON.parse(txt) : null;
+}
+async function fbPut(obj) {
+  const r = await fetch(FB_URL + '/' + FB_PATH + '.json', {
+    method: 'PUT',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify(obj)
+  });
+  if (!r.ok) throw new Error('Firebase PUT ' + r.status);
+  return r.json();
+}
+async function load() {
+  if (cache) return cache;
+  try {
+    if (USE_REDIS) {
+      const out = await redis(['GET', REDIS_KEY]);
+      cache = out && out.result ? JSON.parse(out.result) : defaultDB();
+    } else if (USE_FB) {
+      const data = await fbGet();
+      cache = data && typeof data === 'object' ? data : defaultDB();
+    } else if (fs.existsSync(FILE)) {
+      const raw = fs.readFileSync(FILE, 'utf8');
+      cache = raw ? JSON.parse(raw) : defaultDB();
+    } else {
+      cache = defaultDB();
+      await save();
+    }
+  } catch (e) {
+    cache = defaultDB();
+  }
+  if (!Array.isArray(cache.keys) || !cache.keys.length) cache = defaultDB();
+  return cache;
+}
+function save() {
+  const snapshot = JSON.parse(JSON.stringify(cache));
+  writeChain = writeChain.then(async () => {
+    try {
+      if (USE_REDIS) await redis(['SET', REDIS_KEY, JSON.stringify(snapshot)]);
+      else if (USE_FB) await fbPut(snapshot);
+      else {
+        if (!fs.existsSync(DATA_DIR)) fs.mkdirSync(DATA_DIR, { recursive: true });
+        fs.writeFileSync(FILE, JSON.stringify(snapshot));
+      }
+    } catch (e) {}
+  });
+  return writeChain;
+}
+function backendName() {
+  return USE_REDIS ? 'upstash-redis' : USE_FB ? 'firebase-rtdb' : (IS_VERCEL ? 'vercel-tmp-memory' : 'local-file');
+}
+
+// ---------------- EXPRESS APP & FORTRESS SHIELD ----------------
 const app = express();
 app.disable('x-powered-by');
 app.set('trust proxy', true);
@@ -29,7 +180,7 @@ const PORT = process.env.PORT || 3000;
 const ADMIN_PASSWORD = process.env.ADMIN_PASSWORD || 'admin123';
 const PREDICT_API = (process.env.PREDICT_API || 'https://wingo-api-two.vercel.app').replace(/\/+$/, '');
 const ONLINE_MS = 45000;
-const PUBLIC_DIR = path.join(__dirname, 'public');
+const PUBLIC_DIR = fs.existsSync(path.join(__dirname, 'index.html')) ? __dirname : path.join(__dirname, 'public');
 
 const PLANS = {
   minute: { label: '1 Minute', ms: 60 * 1000 },
@@ -47,7 +198,6 @@ function clientIp(req) {
 }
 function nowMs() { return Date.now(); }
 
-// ---------------- FORTRESS SECURITY SHIELD (Anti-HTTP, Anti-cURL, Anti-Frida, Anti-Replay) ----------------
 const BLOCKED_UA_REGEX = /(curl|wget|python|urllib|httpie|postman|insomnia|axios|node-fetch|go-http-client|libwww-perl|scrapy|headlesschrome|phantomjs|playwright|puppeteer|selenium|frida|xposed|burp|mitmproxy|charles|sqlmap|nikto)/i;
 const usedNonces = new Map();
 
@@ -65,16 +215,12 @@ function fortressWall(req, res, next) {
   if (!isLocal && proto && proto !== 'https') {
     return res.status(403).json({ error: 'Plain HTTP is forbidden. HTTPS required.' });
   }
-
   const ua = String(req.headers['user-agent'] || '');
   if (!ua || ua.length < 12 || BLOCKED_UA_REGEX.test(ua)) {
     return res.status(403).json({ error: 'Automated CLI / scraper blocked by Stylo Fortress.' });
   }
-
   const rl = rateLimit(clientIp(req), 'global_fortress', 180, 60 * 1000);
-  if (!rl.ok) {
-    return res.status(429).json({ error: 'Rate limit exceeded. Try again in ' + rl.retry + 's.' });
-  }
+  if (!rl.ok) return res.status(429).json({ error: 'Rate limit exceeded. Try again in ' + rl.retry + 's.' });
 
   res.setHeader('Strict-Transport-Security', 'max-age=63072000; includeSubDomains; preload');
   res.setHeader('X-Content-Type-Options', 'nosniff');
@@ -97,7 +243,6 @@ function verifySignedApiPacket(req, res, next) {
   if (integrity === 'TAMPERED') {
     return res.status(403).json({ error: 'Client runtime hook / Frida tamper detected.' });
   }
-
   const ts = String(req.headers['x-stylo-ts'] || '');
   const nonce = String(req.headers['x-stylo-nonce'] || '');
   const fp = String(req.headers['x-stylo-fp'] || '');
@@ -108,14 +253,14 @@ function verifySignedApiPacket(req, res, next) {
   }
   const tsNum = parseInt(ts, 10);
   if (!tsNum || Math.abs(nowMs() - tsNum) > 60000) {
-    return res.status(403).json({ error: 'Packet timestamp expired (replay protection).' });
+    return res.status(403).json({ error: 'Packet timestamp expired.' });
   }
   const now = nowMs();
   if (usedNonces.size > 5000) {
     for (const [k, exp] of usedNonces.entries()) { if (now > exp) usedNonces.delete(k); }
   }
   if (usedNonces.has(nonce)) {
-    return res.status(403).json({ error: 'Replay detected: nonce already used.' });
+    return res.status(403).json({ error: 'Replay detected.' });
   }
   usedNonces.set(nonce, now + 60000);
 
