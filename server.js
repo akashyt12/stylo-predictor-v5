@@ -5,6 +5,8 @@ const crypto = require('crypto');
 
 // ---------------- INLINED AUTH & CRYPTO HELPERS ----------------
 const SECRET = process.env.SESSION_SECRET || 'stylo_fortress_v5_default_hmac_secret_2026_998877';
+const PLAN_LIST = ['minute', 'hour', 'day', 'week', 'month', 'year'];
+const EPOCH_2026 = 1767225600000; // 2026-01-01T00:00:00Z
 
 function b64url(buf) {
   return Buffer.from(buf).toString('base64').replace(/\+/g, '-').replace(/\//g, '_').replace(/=+$/, '');
@@ -37,17 +39,62 @@ function verify(token) {
 function sha256(str) {
   return crypto.createHash('sha256').update(str).digest('hex');
 }
+
 const ALPHABET = 'ABCDEFGHJKLMNPQRSTUVWXYZ23456789';
-function genKey() {
-  const pick = () => ALPHABET[crypto.randomInt(0, ALPHABET.length)];
-  const groups = [];
-  for (let g = 0; g < 3; g++) {
-    let s = '';
-    for (let i = 0; i < 4; i++) s += pick();
-    groups.push(s);
+function toB32(num, len) {
+  let s = '';
+  for (let i = len - 1; i >= 0; i--) {
+    s += ALPHABET[(num >>> (i * 5)) & 31];
   }
-  return 'WG-' + groups.join('-');
+  return s;
 }
+function fromB32(str) {
+  let n = 0;
+  for (let i = 0; i < str.length; i++) {
+    const idx = ALPHABET.indexOf(str[i]);
+    if (idx < 0) return -1;
+    n = (n << 5) | idx;
+  }
+  return n >>> 0;
+}
+function keyHmacChars(prefix6) {
+  const digest = crypto.createHmac('sha256', SECRET).update('KEY:' + prefix6).digest();
+  let out = '';
+  for (let i = 0; i < 6; i++) out += ALPHABET[digest[i] & 31];
+  return out;
+}
+
+// Generates a cryptographically signed Admin key: WG-AAAA-BBBB-CCCC
+function genKey(planName) {
+  const pIdx = Math.max(0, PLAN_LIST.indexOf(planName || 'day'));
+  const slot10m = Math.max(0, Math.floor((Date.now() - EPOCH_2026) / 600000)) & 0x1FFFF;
+  const packed20 = ((pIdx & 7) << 17) | slot10m;
+  const g1 = toB32(packed20, 4);
+  const s1 = ALPHABET[crypto.randomInt(0, 32)] + ALPHABET[crypto.randomInt(0, 32)];
+  const mac6 = keyHmacChars(g1 + s1);
+  const g2 = s1 + mac6.slice(0, 2);
+  const g3 = mac6.slice(2, 6);
+  return 'WG-' + g1 + '-' + g2 + '-' + g3;
+}
+
+function verifyStatelessKey(rawKey, plansObj) {
+  if (!/^WG-[A-Z2-9]{4}-[A-Z2-9]{4}-[A-Z2-9]{4}$/.test(rawKey)) return null;
+  const parts = rawKey.slice(3).split('-');
+  const g1 = parts[0], g2 = parts[1], g3 = parts[2];
+  const s1 = g2.slice(0, 2);
+  const macProvided = g2.slice(2, 4) + g3;
+  const macExpected = keyHmacChars(g1 + s1);
+  if (!safeEqual(macProvided, macExpected)) return null;
+  const packed20 = fromB32(g1);
+  const pIdx = (packed20 >>> 17) & 7;
+  const slot10m = packed20 & 0x1FFFF;
+  const plan = PLAN_LIST[pIdx] || 'day';
+  const created = EPOCH_2026 + slot10m * 600000;
+  const durMs = (plansObj[plan] && plansObj[plan].ms) || 86400000;
+  const expires = created + durMs + 600000;
+  return { plan, created, expires };
+}
+
 function safeEqual(a, b) {
   const ab = Buffer.from(String(a));
   const bb = Buffer.from(String(b));
@@ -66,7 +113,7 @@ function rateLimit(ip, name, max, windowMs) {
   return { ok, remaining: Math.max(0, max - b.count), retry };
 }
 
-// ---------------- INLINED STORAGE (REDIS / FIREBASE / VERCEL TMP) ----------------
+// ---------------- INLINED STORAGE (ZERO DEMO KEYS) ----------------
 const IS_VERCEL = !!process.env.VERCEL || !!process.env.AWS_LAMBDA_FUNCTION_NAME;
 const DATA_DIR = process.env.DATA_DIR || (IS_VERCEL ? '/tmp/stylo_data' : path.join(__dirname, 'data'));
 const FILE = path.join(DATA_DIR, 'db.json');
@@ -82,27 +129,10 @@ let cache = null;
 let writeChain = Promise.resolve();
 
 function defaultDB() {
-  const now = Date.now();
-  const demoRaw = 'WG-STYL-O202-6PRO';
   return {
-    keys: [
-      {
-        id: 'k_vip_default',
-        hash: sha256(demoRaw),
-        last4: '6PRO',
-        plan: 'year',
-        note: 'Master VIP Pass (WG-STYL-O202-6PRO)',
-        created: now,
-        expires: now + 365 * 24 * 60 * 60 * 1000,
-        revoked: false,
-        boundFp: null,
-        lastIp: null,
-        firstUsed: null,
-        lastSeen: null,
-        hits: 0
-      }
-    ],
-    meta: { created: now }
+    keys: [],
+    revokedHashes: [],
+    meta: { created: Date.now() }
   };
 }
 
@@ -149,7 +179,8 @@ async function load() {
   } catch (e) {
     cache = defaultDB();
   }
-  if (!Array.isArray(cache.keys) || !cache.keys.length) cache = defaultDB();
+  if (!Array.isArray(cache.keys)) cache.keys = [];
+  if (!Array.isArray(cache.revokedHashes)) cache.revokedHashes = [];
   return cache;
 }
 function save() {
@@ -282,7 +313,7 @@ function pubKey(k) {
   const online = !k.revoked && k.expires > nowMs() && k.lastSeen && (nowMs() - k.lastSeen < ONLINE_MS);
   return {
     id: k.id,
-    key: k.last4 ? 'WG-••••-••••-' + k.last4 : 'WG-••••',
+    key: k.rawKey || (k.last4 ? 'WG-••••-••••-' + k.last4 : 'WG-••••'),
     plan: k.plan,
     planLabel: (PLANS[k.plan] && PLANS[k.plan].label) || k.plan,
     note: k.note || '',
@@ -315,15 +346,22 @@ async function requireUser(req, res, next) {
   const p = verify(bearer(req));
   if (!p || p.role !== 'user' || !p.kid) return res.status(401).json({ error: 'Login required' });
   const db = await load();
-  const key = db.keys.find((k) => k.id === p.kid);
-  if (!key || key.revoked || key.expires <= nowMs()) {
+  if (p.khash && db.revokedHashes.includes(p.khash)) {
+    return res.status(401).json({ error: 'Key revoked by admin' });
+  }
+  let key = db.keys.find((k) => k.id === p.kid);
+  if (key && (key.revoked || key.expires <= nowMs())) {
     return res.status(401).json({ error: 'Key expired or revoked' });
   }
-  key.lastSeen = nowMs();
-  key.lastIp = clientIp(req);
-  key.hits = (key.hits || 0) + 1;
-  if (!key.firstUsed) key.firstUsed = nowMs();
-  save();
+  if (!key) {
+    key = { id: p.kid, plan: p.plan || 'day', expires: p.exp, lastIp: clientIp(req), lastSeen: nowMs(), hits: 1 };
+  } else {
+    key.lastSeen = nowMs();
+    key.lastIp = clientIp(req);
+    key.hits = (key.hits || 0) + 1;
+    if (!key.firstUsed) key.firstUsed = nowMs();
+    save();
+  }
   req.key = key;
   next();
 }
@@ -341,9 +379,32 @@ app.post('/api/login', async (req, res) => {
   }
   const db = await load();
   const hash = sha256(key);
-  const found = db.keys.find((k) => k.hash === hash);
-  if (!found) return res.status(401).json({ error: 'Key not found' });
-  if (found.revoked) return res.status(403).json({ error: 'Key revoked' });
+  if (db.revokedHashes.includes(hash)) {
+    return res.status(403).json({ error: 'Key has been revoked by admin' });
+  }
+  let found = db.keys.find((k) => k.hash === hash);
+  if (!found) {
+    // Verify if this key was cryptographically generated by Admin Console
+    const stateless = verifyStatelessKey(key, PLANS);
+    if (!stateless) return res.status(401).json({ error: 'Access key not found. Contact Admin for a valid key.' });
+    found = {
+      id: 'k_' + hash.slice(0, 12),
+      rawKey: key,
+      hash,
+      last4: key.slice(-4),
+      plan: stateless.plan,
+      note: 'Admin Key',
+      created: stateless.created,
+      expires: stateless.expires,
+      revoked: false,
+      lastIp: null,
+      firstUsed: null,
+      lastSeen: null,
+      hits: 0
+    };
+    db.keys.push(found);
+  }
+  if (found.revoked) return res.status(403).json({ error: 'Key revoked by admin' });
   if (found.expires <= nowMs()) return res.status(403).json({ error: 'Key expired' });
 
   found.lastSeen = nowMs();
@@ -352,9 +413,10 @@ app.post('/api/login', async (req, res) => {
   if (!found.firstUsed) found.firstUsed = nowMs();
   await save();
 
-  const token = sign({ role: 'user', kid: found.id, plan: found.plan, fp: req.clientFp }, Math.min(found.expires - nowMs(), 24 * 60 * 60 * 1000));
+  const token = sign({ role: 'user', kid: found.id, khash: hash, plan: found.plan, fp: req.clientFp }, Math.min(found.expires - nowMs(), 24 * 60 * 60 * 1000));
   res.json({
     token,
+    key: key,
     plan: found.plan,
     planLabel: (PLANS[found.plan] && PLANS[found.plan].label) || found.plan,
     expires: found.expires
@@ -451,9 +513,10 @@ app.post('/api/admin/keys', requireAdmin, async (req, res) => {
   const created = [];
   for (let i = 0; i < count; i++) {
     let raw, hash;
-    do { raw = genKey(); hash = sha256(raw); } while (db.keys.some((k) => k.hash === hash));
+    do { raw = genKey(plan); hash = sha256(raw); } while (db.keys.some((k) => k.hash === hash));
     const rec = {
-      id: crypto.randomBytes(9).toString('hex'),
+      id: 'k_' + hash.slice(0, 12),
+      rawKey: raw,
       hash,
       last4: raw.slice(-4),
       plan,
@@ -484,15 +547,18 @@ app.post('/api/admin/keys/:id/revoke', requireAdmin, async (req, res) => {
   const k = db.keys.find((x) => x.id === req.params.id);
   if (!k) return res.status(404).json({ error: 'Not found' });
   k.revoked = !k.revoked;
+  if (k.revoked && k.hash && !db.revokedHashes.includes(k.hash)) db.revokedHashes.push(k.hash);
+  if (!k.revoked && k.hash) db.revokedHashes = db.revokedHashes.filter((h) => h !== k.hash);
   await save();
   res.json({ ok: true, revoked: k.revoked });
 });
 
 app.delete('/api/admin/keys/:id', requireAdmin, async (req, res) => {
   const db = await load();
-  const before = db.keys.length;
+  const target = db.keys.find((x) => x.id === req.params.id);
+  if (!target) return res.status(404).json({ error: 'Not found' });
+  if (target.hash && !db.revokedHashes.includes(target.hash)) db.revokedHashes.push(target.hash);
   db.keys = db.keys.filter((x) => x.id !== req.params.id);
-  if (db.keys.length === before) return res.status(404).json({ error: 'Not found' });
   await save();
   res.json({ ok: true });
 });
