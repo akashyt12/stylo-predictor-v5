@@ -1,0 +1,141 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<meta name="theme-color" content="#050505">
+<title>Predictor — Stylo Predictor</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link href="https://fonts.googleapis.com/css2?family=JetBrains+Mono:wght@500;700;800&family=Space+Grotesk:wght@400;500;600;700&family=Syne:wght@700;800&display=swap" rel="stylesheet">
+<link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/@phosphor-icons/web@2.1.1/src/duotone/style.css">
+<link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/@phosphor-icons/web@2.1.1/src/bold/style.css">
+<link rel="stylesheet" href="/assets/css/style.css">
+</head>
+<body>
+<div class="holo-bg"><span class="nebula n1"></span><span class="nebula n2"></span><span class="nebula n3"></span></div>
+<canvas id="holoCanvas"></canvas>
+<div class="synth-grid"></div>
+
+<svg width="0" height="0" style="position:absolute" aria-hidden="true">
+  <defs>
+    <linearGradient id="ringGrad" x1="0" y1="0" x2="1" y2="1">
+      <stop offset="0%" stop-color="#38bdf8"/>
+      <stop offset="55%" stop-color="#22e07a"/>
+      <stop offset="100%" stop-color="#a855f7"/>
+    </linearGradient>
+  </defs>
+</svg>
+
+<header class="topbar">
+  <div class="wrap">
+    <div class="brand">
+      <span class="logo"><svg viewBox="0 0 24 24"><path d="M12 2a10 10 0 1 0 0 20 10 10 0 0 0 0-20zm0 17a7 7 0 1 1 0-14 7 7 0 0 1 0 14zm0-11a4 4 0 1 0 0 8 4 4 0 0 0 0-8z"/></svg></span>
+      <span class="name hide-sm">Stylo <span>Predictor</span></span>
+    </div>
+    <div class="top-right">
+      <span class="pill" id="livePill"><span class="dot"></span><span>Live</span></span>
+      <span class="pill plan" id="planPill">—</span>
+      <button class="btn ghost sm" id="logoutBtn">
+        <svg width="15" height="15" viewBox="0 0 24 24" fill="currentColor"><path d="M10 3H5a2 2 0 0 0-2 2v14a2 2 0 0 0 2 2h5v-2H5V5h5V3zm6.6 4.6L15.2 9l1.6 1.6H10v2h6.8L15.2 14.2l1.4 1.4 4-4-4-4z"/></svg>
+        Logout
+      </button>
+    </div>
+  </div>
+</header>
+
+<main class="wrap main">
+  <div class="page-head">
+    <h1>Live Predictor</h1>
+    <p>1-second auto refresh · Big/Small &amp; Colour modes</p>
+  </div>
+
+  <div class="grid-app">
+    <!-- ===== Prediction hero ===== -->
+    <section class="hero">
+      <div class="hero-top">
+        <div class="hero-status"><span class="pulse-dot"></span><span id="statusText">Connecting…</span></div>
+        <div class="seg" id="modeSeg">
+          <button data-mode="size" class="on">Big / Small</button>
+          <button data-mode="color">Colour</button>
+        </div>
+      </div>
+
+      <div class="hero-main">
+        <div class="ring-wrap">
+          <svg class="ring" viewBox="0 0 120 120">
+            <circle class="ring-bg" cx="60" cy="60" r="54"></circle>
+            <circle class="ring-fg" id="ringFg" cx="60" cy="60" r="54"></circle>
+          </svg>
+          <div class="ring-txt"><b id="countdown">--</b><small>sec left</small></div>
+        </div>
+        <div class="hero-val">
+          <div class="lbl" id="resLbl">Prediction</div>
+          <div class="val neutral" id="resVal">—</div>
+          <div class="sub" id="resSub">Waiting for data…</div>
+          <div class="lastpick hide" id="lastPick"></div>
+        </div>
+      </div>
+
+      <div class="bars" id="bars">
+        <div class="bar-row"><span class="k"><i class="ico big"></i>BIG</span><div class="track red"><i style="width:0"></i></div><span class="v">—</span></div>
+        <div class="bar-row"><span class="k"><i class="ico small"></i>SMALL</span><div class="track"><i style="width:0"></i></div><span class="v">—</span></div>
+      </div>
+
+      <div class="meta-grid">
+        <div class="meta-box"><div class="k">Period</div><div class="v sm" id="period">—</div></div>
+        <div class="meta-box"><div class="k">Confidence</div><div class="v" id="conf">—</div></div>
+      </div>
+      <div class="period-bar"><i id="periodFill"></i></div>
+    </section>
+
+    <!-- ===== Sidebar ===== -->
+    <aside class="stack">
+      <div class="glass panel">
+        <div class="sess-head">
+          <b>Session</b>
+          <span class="tiny muted" id="sessionMode">Big/Small accuracy</span>
+        </div>
+        <div class="row" style="gap:16px;align-items:center">
+          <div class="acc-ring">
+            <svg viewBox="0 0 74 74">
+              <circle class="bg" cx="37" cy="37" r="33"></circle>
+              <circle class="fg" id="accFg" cx="37" cy="37" r="33"></circle>
+            </svg>
+            <div class="t" id="accPct">—</div>
+          </div>
+          <div class="stats" style="flex:1;margin-top:0">
+            <div class="stat"><div class="v" id="stTotal">0</div><div class="k">Total</div></div>
+            <div class="stat good"><div class="v" id="stWin">0</div><div class="k">Wins</div></div>
+            <div class="stat bad"><div class="v" id="stLoss">0</div><div class="k">Losses</div></div>
+          </div>
+        </div>
+      </div>
+
+      <div class="glass panel">
+        <div class="hist-head">
+          <b>Recent Results</b>
+          <button class="btn ghost xs" id="refreshBtn">
+            <svg width="13" height="13" viewBox="0 0 24 24" fill="currentColor"><path d="M12 5V1L7 6l5 5V7a6 6 0 1 1-6 6H4a8 8 0 1 0 8-8z"/></svg>
+            Refresh
+          </button>
+        </div>
+        <div class="hist-list" id="histList">
+          <div class="hrow skel" style="height:48px"></div>
+          <div class="hrow skel" style="height:48px"></div>
+          <div class="hrow skel" style="height:48px"></div>
+        </div>
+      </div>
+
+      <div class="glass panel spread">
+        <span class="small muted">Key expires in</span>
+        <b id="keyLeft" class="mono">—</b>
+      </div>
+    </aside>
+  </div>
+</main>
+
+<script src="/assets/js/common.js"></script>
+<script src="/assets/js/app.js"></script>
+</body>
+</html>
