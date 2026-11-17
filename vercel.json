@@ -1,5 +1,12 @@
 {
+  "framework": null,
   "cleanUrls": true,
+  "outputDirectory": "public",
+  "functions": {
+    "api/[...path].js": {
+      "maxDuration": 30
+    }
+  },
   "headers": [
     {
       "source": "/(.*)",

@@ -1,4 +1,6 @@
-const serverless = require('serverless-http');
 const app = require('../server');
 
-module.exports = serverless(app);
+// Vercel Node runtime expects a plain (req, res) request handler.
+module.exports = (req, res) => {
+  app(req, res);
+};
