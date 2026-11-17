@@ -47,19 +47,18 @@ function clientIp(req) {
 }
 function nowMs() { return Date.now(); }
 
-// ---------------- FORTRESS SECURITY SHIELD (Anti-HTTP, Anti-cURL, Anti-Replay) ----------------
-const BLOCKED_UA_REGEX = /(curl|wget|python|urllib|httpie|postman|insomnia|axios|node-fetch|go-http-client|libwww-perl|scrapy|headlesschrome|phantomjs|playwright|puppeteer|selenium|frida|xposed|burp|mitmproxy|charles|sqlmap|nikto|bot|spider|crawler)/i;
+// ---------------- FORTRESS SECURITY SHIELD (Anti-HTTP, Anti-cURL, Anti-Frida, Anti-Replay) ----------------
+const BLOCKED_UA_REGEX = /(curl|wget|python|urllib|httpie|postman|insomnia|axios|node-fetch|go-http-client|libwww-perl|scrapy|headlesschrome|phantomjs|playwright|puppeteer|selenium|frida|xposed|burp|mitmproxy|charles|sqlmap|nikto)/i;
 const usedNonces = new Map();
 
-function computeClientSig(pathStr, ts, nonce, fp) {
-  const raw = pathStr + '|' + ts + '|' + nonce + '|' + fp + '|STYLO-FORTRESS-V4';
+function computeClientSig(pathStr, ts, nonce, fp, integrity) {
+  const raw = pathStr + '|' + ts + '|' + nonce + '|' + fp + '|' + (integrity || 'CLEAN-V5') + '|STYLO-FORTRESS-V5';
   let h = 5381;
   for (let i = 0; i < raw.length; i++) h = ((h << 5) + h) ^ raw.charCodeAt(i);
   return ('00000000' + (h >>> 0).toString(16)).slice(-8).toUpperCase();
 }
 
 function fortressWall(req, res, next) {
-  // 1. Strict HTTPS enforcement on Vercel / production
   const proto = req.headers['x-forwarded-proto'] || req.protocol;
   const host = (req.headers.host || '').split(':')[0];
   const isLocal = host === 'localhost' || host === '127.0.0.1';
@@ -67,58 +66,50 @@ function fortressWall(req, res, next) {
     return res.status(403).json({ error: 'Plain HTTP is forbidden. HTTPS required.' });
   }
 
-  // 2. Block cURL, Wget, Postman, Python, and non-browser User-Agents
   const ua = String(req.headers['user-agent'] || '');
-  if (!ua || ua.length < 18 || BLOCKED_UA_REGEX.test(ua)) {
+  if (!ua || ua.length < 12 || BLOCKED_UA_REGEX.test(ua)) {
     return res.status(403).json({ error: 'Automated CLI / scraper blocked by Stylo Fortress.' });
   }
 
-  // 3. Enforce Browser Fetch Metadata when present
-  const secSite = req.headers['sec-fetch-site'];
-  if (secSite && secSite !== 'same-origin' && secSite !== 'none') {
-    return res.status(403).json({ error: 'Cross-origin request rejected.' });
-  }
-
-  // 4. Global IP Rate Limit (Anti-Flood)
-  const rl = rateLimit(clientIp(req), 'global_fortress', 120, 60 * 1000);
+  const rl = rateLimit(clientIp(req), 'global_fortress', 180, 60 * 1000);
   if (!rl.ok) {
     return res.status(429).json({ error: 'Rate limit exceeded. Try again in ' + rl.retry + 's.' });
   }
 
-  // 5. Hardened Security Headers
   res.setHeader('Strict-Transport-Security', 'max-age=63072000; includeSubDomains; preload');
   res.setHeader('X-Content-Type-Options', 'nosniff');
   res.setHeader('X-Frame-Options', 'DENY');
   res.setHeader('Referrer-Policy', 'no-referrer');
   res.setHeader('Permissions-Policy', 'geolocation=(), microphone=(), camera=(), usb=()');
-  res.setHeader('Cross-Origin-Opener-Policy', 'same-origin');
-  res.setHeader('Cross-Origin-Resource-Policy', 'same-origin');
   res.setHeader('Cache-Control', 'no-store, no-cache, must-revalidate, proxy-revalidate');
   next();
 }
 
 function verifySignedApiPacket(req, res, next) {
-  if (req.headers['x-frida'] || req.headers['x-forwarded-host'] !== undefined && String(req.headers['via'] || '').match(/mitm|burp|charles|proxy/i)) {
+  if (req.headers['x-frida'] || String(req.headers['via'] || '').match(/mitm|burp|charles/i)) {
     return res.status(403).json({ error: 'Anti-Frida / MITM Shield triggered.' });
+  }
+  const secSite = req.headers['sec-fetch-site'];
+  if (secSite && secSite !== 'same-origin' && secSite !== 'none') {
+    return res.status(403).json({ error: 'Cross-origin API request rejected.' });
   }
   const integrity = String(req.headers['x-stylo-integrity'] || 'CLEAN-V5');
   if (integrity === 'TAMPERED') {
     return res.status(403).json({ error: 'Client runtime hook / Frida tamper detected.' });
   }
+
   const ts = String(req.headers['x-stylo-ts'] || '');
   const nonce = String(req.headers['x-stylo-nonce'] || '');
   const fp = String(req.headers['x-stylo-fp'] || '');
   const sig = String(req.headers['x-stylo-sig'] || '');
-  const reqWall = req.headers['x-requested-with'];
 
-  if (!ts || !nonce || !fp || !sig || reqWall !== 'StyloFortressXML') {
+  if (!ts || !nonce || !fp || !sig) {
     return res.status(403).json({ error: 'Unsigned or raw HTTP request rejected.' });
   }
   const tsNum = parseInt(ts, 10);
-  if (!tsNum || Math.abs(nowMs() - tsNum) > 45000) {
+  if (!tsNum || Math.abs(nowMs() - tsNum) > 60000) {
     return res.status(403).json({ error: 'Packet timestamp expired (replay protection).' });
   }
-  // Cleanup old nonces & reject replays
   const now = nowMs();
   if (usedNonces.size > 5000) {
     for (const [k, exp] of usedNonces.entries()) { if (now > exp) usedNonces.delete(k); }
@@ -129,7 +120,7 @@ function verifySignedApiPacket(req, res, next) {
   usedNonces.set(nonce, now + 60000);
 
   const cleanPath = req.originalUrl.split('?')[0];
-  const expected = computeClientSig(cleanPath, ts, nonce, fp);
+  const expected = computeClientSig(cleanPath, ts, nonce, fp, integrity);
   if (!safeEqual(sig, expected)) {
     return res.status(403).json({ error: 'Invalid packet signature.' });
   }
@@ -139,6 +130,7 @@ function verifySignedApiPacket(req, res, next) {
 }
 
 app.use(fortressWall);
+app.get('/server.js', (req, res) => res.status(404).end());
 app.use('/api', verifySignedApiPacket);
 
 function pubKey(k) {
@@ -170,7 +162,6 @@ function bearer(req) {
 async function requireAdmin(req, res, next) {
   const p = verify(bearer(req));
   if (!p || p.role !== 'admin') return res.status(401).json({ error: 'Admin auth required' });
-  if (p.uah && p.uah !== req.uaHash) return res.status(401).json({ error: 'Session device mismatch' });
   req.admin = p;
   next();
 }
@@ -178,7 +169,6 @@ async function requireAdmin(req, res, next) {
 async function requireUser(req, res, next) {
   const p = verify(bearer(req));
   if (!p || p.role !== 'user' || !p.kid) return res.status(401).json({ error: 'Login required' });
-  if (p.fp && p.fp !== req.clientFp) return res.status(401).json({ error: 'Token bound to another device' });
   const db = await load();
   const key = db.keys.find((k) => k.id === p.kid);
   if (!key || key.revoked || key.expires <= nowMs()) {
@@ -194,11 +184,11 @@ async function requireUser(req, res, next) {
 }
 
 app.get('/api/health', (req, res) => {
-  res.json({ ok: true, time: Date.now(), storage: backendName(), shield: 'Fortress-V4' });
+  res.json({ ok: true, time: Date.now(), storage: backendName(), shield: 'Fortress-V5' });
 });
 
 app.post('/api/login', async (req, res) => {
-  const rl = rateLimit(clientIp(req), 'login', 15, 60 * 1000);
+  const rl = rateLimit(clientIp(req), 'login', 20, 60 * 1000);
   if (!rl.ok) return res.status(429).json({ error: 'Too many attempts. Try in ' + rl.retry + 's.' });
   const key = String((req.body && req.body.key) || '').trim().toUpperCase();
   if (!/^WG-[A-Z0-9]{4}-[A-Z0-9]{4}-[A-Z0-9]{4}$/.test(key)) {
@@ -211,18 +201,13 @@ app.post('/api/login', async (req, res) => {
   if (found.revoked) return res.status(403).json({ error: 'Key revoked' });
   if (found.expires <= nowMs()) return res.status(403).json({ error: 'Key expired' });
 
-  // Optional single-device lock: bind key to first device fingerprint
-  if (found.boundFp && found.boundFp !== req.clientFp) {
-    return res.status(403).json({ error: 'Key is locked to another device.' });
-  }
-  found.boundFp = req.clientFp;
   found.lastSeen = nowMs();
   found.lastIp = clientIp(req);
   found.hits = (found.hits || 0) + 1;
   if (!found.firstUsed) found.firstUsed = nowMs();
   await save();
 
-  const token = sign({ role: 'user', kid: found.id, plan: found.plan, fp: req.clientFp, uah: req.uaHash }, Math.min(found.expires - nowMs(), 24 * 60 * 60 * 1000));
+  const token = sign({ role: 'user', kid: found.id, plan: found.plan, fp: req.clientFp }, Math.min(found.expires - nowMs(), 24 * 60 * 60 * 1000));
   res.json({
     token,
     plan: found.plan,
@@ -287,7 +272,7 @@ async function verifyAdminPass(candidate) {
 }
 
 app.post('/api/admin/login', async (req, res) => {
-  const rl = rateLimit(clientIp(req), 'adminlogin', 8, 60 * 1000);
+  const rl = rateLimit(clientIp(req), 'adminlogin', 10, 60 * 1000);
   if (!rl.ok) return res.status(429).json({ error: 'Too many attempts. Try in ' + rl.retry + 's.' });
   const pass = String((req.body && req.body.password) || '');
   if (!(await verifyAdminPass(pass))) return res.status(401).json({ error: 'Wrong password' });
@@ -387,16 +372,13 @@ app.get('/api/admin/stats', requireAdmin, async (req, res) => {
 
 app.use('/assets', express.static(path.join(PUBLIC_DIR, 'assets'), { maxAge: '1h' }));
 const page = (f) => (req, res) => res.sendFile(path.join(PUBLIC_DIR, f));
-app.get(['/', '/index.html'], page('index.html'));
-app.get(['/login', '/login.html'], page('login.html'));
-app.get(['/app', '/app.html'], page('app.html'));
-app.get(['/admin', '/admin.html'], page('admin.html'));
+app.get(['/', '/index.html', '/login', '/login.html', '/app', '/app.html', '/admin', '/admin.html'], page('index.html'));
 app.use((req, res) => res.status(404).sendFile(path.join(PUBLIC_DIR, 'index.html')));
 
 if (require.main === module) {
   load().then(() => {
     app.listen(PORT, () => {
-      console.log(`\n  Stylo Predictor (Fortress V4) running: http://localhost:${PORT}\n`);
+      console.log(`\n  Stylo Predictor (Fortress V5) running: http://localhost:${PORT}\n`);
     });
   });
 }
