@@ -662,9 +662,8 @@ table.tbl td { padding: 11px 10px; border-bottom: 1px solid rgba(255,255,255,0.0
       <button class="btn full" id="loginSubmitBtn" type="submit"><i class="ph-bold ph-lock-key-open"></i> Unlock Arena</button>
     </form>
 
-    <div class="demo-box">
-      <span><i class="ph-duotone ph-key" style="color:var(--emerald)"></i> Demo: <b class="mono" style="color:var(--emerald)">WG-STYL-O202-6PRO</b></span>
-      <button type="button" class="btn ghost xs" id="useDemoBtn">Auto-Fill</button>
+    <div class="demo-box" style="justify-content:center">
+      <span class="tiny muted"><i class="ph-duotone ph-shield-check" style="color:var(--emerald)"></i> Admin-issued access key required to unlock</span>
     </div>
 
     <p class="small muted mt2 center-t">
@@ -1138,17 +1137,13 @@ table.tbl td { padding: 11px 10px; border-bottom: 1px solid rgba(255,255,255,0.0
   function lsSet(k, v) { try { localStorage.setItem(k, JSON.stringify(v)); } catch (e) {} }
   function lsDel(k) { try { localStorage.removeItem(k); } catch (e) {} }
 
-  var now = Date.now();
-  var defaultKeys = [
-    { id: 'k_demo_1', key: 'WG-STYL-O202-6PRO', plan: 'day', note: 'VIP Demo Pass', created: now - 3600000, expires: now + 86400000, revoked: false, lastIp: '103.21.58.14', lastSeen: now - 4000, hits: 42 },
-    { id: 'k_demo_2', key: 'WG-LORD-9981-APEX', plan: 'week', note: 'Creator Pass', created: now - 7200000, expires: now + 604800000, revoked: false, lastIp: '49.36.120.88', lastSeen: now - 160000, hits: 118 }
-  ];
-  var keyStore = lsGet('stylo_holo_keys_v3', defaultKeys);
-  if (!Array.isArray(keyStore) || !keyStore.length) keyStore = defaultKeys;
-  var session = lsGet('stylo_holo_sess_v3', null);
+  var defaultKeys = [];
+  var keyStore = lsGet('stylo_holo_keys_v6', defaultKeys);
+  if (!Array.isArray(keyStore)) keyStore = [];
+  var session = lsGet('stylo_holo_sess_v6', null);
   var adminAuthed = lsGet('stylo_holo_adm_v3', false);
   var adminSecret = lsGet('stylo_holo_adm_pwd_v5', 'admin123');
-  function saveKeys() { lsSet('stylo_holo_keys_v3', keyStore); }
+  function saveKeys() { lsSet('stylo_holo_keys_v6', keyStore); }
 
   function toast(msg, type) {
     var host = $('toasts');
@@ -1333,9 +1328,8 @@ table.tbl td { padding: 11px 10px; border-bottom: 1px solid rgba(255,255,255,0.0
   $('pasteBtn').addEventListener('click', async function () {
     try { keyInput.value = (await navigator.clipboard.readText()).trim(); keyInput.dispatchEvent(new Event('input')); } catch (e) { keyInput.focus(); }
   });
-  $('useDemoBtn').addEventListener('click', function () { keyInput.value = 'WG-STYL-O202-6PRO'; toast('Demo key filled', 'ok'); });
 
-  $('loginForm').addEventListener('submit', function (e) {
+  $('loginForm').addEventListener('submit', async function (e) {
     e.preventDefault(); $('loginErrBox').classList.add('hide');
     var val = keyInput.value.trim().toUpperCase();
     if (!/^WG-[A-Z0-9]{4}-[A-Z0-9]{4}-[A-Z0-9]{4}$/.test(val)) {
@@ -1343,13 +1337,38 @@ table.tbl td { padding: 11px 10px; border-bottom: 1px solid rgba(255,255,255,0.0
       $('loginErrBox').classList.remove('hide'); $('loginCard').classList.add('shake');
       setTimeout(function () { $('loginCard').classList.remove('shake'); }, 420); return;
     }
+    // First try server API (for live Vercel multi-device keys), fallback to local keyStore in preview
+    try {
+      var hdrs = Object.assign({ 'Content-Type': 'application/json' }, signPacket('/api/login'));
+      var apiOrigin = (location.origin && location.origin.indexOf('http') === 0) ? location.origin : ''; if (!apiOrigin) throw new Error('local'); var r = await fetch(apiOrigin + '/api/login', { method: 'POST', headers: hdrs, body: JSON.stringify({ key: val }) });
+      if (r.ok) {
+        var data = await r.json();
+        session = { key: val, token: data.token, plan: data.plan, planLabel: data.planLabel, expires: data.expires };
+        lsSet('stylo_holo_sess_v6', session);
+        runVerificationSequence('Verifying Key · ' + session.planLabel, function () {
+          toast('Arena unlocked · ' + session.planLabel, 'ok');
+          showView('viewApp');
+        });
+        return;
+      } else if (r.status === 401 || r.status === 403) {
+        var errData = await r.json().catch(function () { return {}; });
+        // Also check local keyStore in case key was generated locally
+        var localMatch = keyStore.find(function (k) { return k.key === val; });
+        if (!localMatch) {
+          $('loginErrMsg').textContent = errData.error || 'Access key not found. Generate a key in Admin Console first.';
+          $('loginErrBox').classList.remove('hide');
+          return;
+        }
+      }
+    } catch (netErr) { /* preview mode fallback below */ }
+
     var found = keyStore.find(function (k) { return k.key === val; });
-    if (!found) { $('loginErrMsg').textContent = 'Key not found. Use Demo or generate in Admin.'; $('loginErrBox').classList.remove('hide'); return; }
+    if (!found) { $('loginErrMsg').textContent = 'Access key not found. Generate a key in Admin Console first.'; $('loginErrBox').classList.remove('hide'); return; }
     if (found.revoked) { $('loginErrMsg').textContent = 'Key revoked by admin.'; $('loginErrBox').classList.remove('hide'); return; }
     if (found.expires <= Date.now()) { $('loginErrMsg').textContent = 'Key expired.'; $('loginErrBox').classList.remove('hide'); return; }
     found.lastSeen = Date.now(); found.hits = (found.hits || 0) + 1; saveKeys();
     session = { key: found.key, plan: found.plan, planLabel: PLANS[found.plan].label, expires: found.expires };
-    lsSet('stylo_holo_sess_v3', session);
+    lsSet('stylo_holo_sess_v6', session);
 
     runVerificationSequence('Verifying Key · ' + session.planLabel, function () {
       toast('Arena unlocked · ' + session.planLabel, 'ok');
@@ -1623,7 +1642,7 @@ table.tbl td { padding: 11px 10px; border-bottom: 1px solid rgba(255,255,255,0.0
     toast(soundEnabled ? 'Sound FX enabled' : 'Sound FX muted', 'ok');
     if (soundEnabled) playChime(700);
   });
-  $('appLogoutBtn').addEventListener('click', function () { session = null; lsDel('stylo_holo_sess_v3'); showView('viewLogin'); toast('Logged out', 'ok'); });
+  $('appLogoutBtn').addEventListener('click', function () { session = null; lsDel('stylo_holo_sess_v6'); showView('viewLogin'); toast('Logged out', 'ok'); });
   $('appAdminBtn').addEventListener('click', function () { showView('viewAdmin'); renderAdminAuthState(); });
 
   var keyFilter = 'all', pendingDeleteId = null;
@@ -1728,14 +1747,42 @@ table.tbl td { padding: 11px 10px; border-bottom: 1px solid rgba(255,255,255,0.0
     $('keysBody').innerHTML = kHtml || '<tr><td colspan="7" class="muted center-t" style="padding:18px">No keys in this filter.</td></tr>';
   }
 
-  $('genForm').addEventListener('submit', function (e) {
+  $('genForm').addEventListener('submit', async function (e) {
     e.preventDefault();
     var plan = $('genPlan').value, count = Math.min(Math.max(parseInt($('genCount').value, 10) || 1, 1), 50), note = $('genNote').value.trim().slice(0, 80);
     var outHtml = '', t = Date.now();
-    for (var i = 0; i < count; i++) {
-      var raw = genKeyString();
-      keyStore.unshift({ id: 'k_' + t + '_' + i, key: raw, plan: plan, note: note, created: t, expires: t + PLANS[plan].ms, revoked: false, lastIp: '127.0.0.1', lastSeen: null, hits: 0 });
-      outHtml += '<div class="genrow"><span class="keyval">' + esc(raw) + '</span><button type="button" class="btn ghost xs" data-copy="' + esc(raw) + '"><i class="ph-bold ph-copy"></i> Copy</button></div>';
+    var createdList = null;
+    try {
+      var admTok = lsGet('stylo_adm_jwt_v6', '');
+      if (!admTok) {
+        var lr = await fetch(((location.origin && location.origin.indexOf('http') === 0) ? location.origin : '') + '/api/admin/login', {
+          method: 'POST',
+          headers: Object.assign({ 'Content-Type': 'application/json' }, signPacket('/api/admin/login')),
+          body: JSON.stringify({ password: adminSecret })
+        });
+        if (lr.ok) { var ld = await lr.json(); admTok = ld.token; lsSet('stylo_adm_jwt_v6', admTok); }
+      }
+      if (admTok) {
+        var kr = await fetch(((location.origin && location.origin.indexOf('http') === 0) ? location.origin : '') + '/api/admin/keys', {
+          method: 'POST',
+          headers: Object.assign({ 'Content-Type': 'application/json', 'Authorization': 'Bearer ' + admTok }, signPacket('/api/admin/keys')),
+          body: JSON.stringify({ plan: plan, count: count, note: note })
+        });
+        if (kr.ok) { var kd = await kr.json(); createdList = kd.created; }
+      }
+    } catch (netErr) {}
+
+    if (createdList && createdList.length) {
+      createdList.forEach(function (c) {
+        keyStore.unshift({ id: c.id, key: c.key, plan: c.plan, note: note, created: t, expires: c.expires, revoked: false, lastIp: '127.0.0.1', lastSeen: null, hits: 0 });
+        outHtml += '<div class="genrow"><span class="keyval">' + esc(c.key) + '</span><button type="button" class="btn ghost xs" data-copy="' + esc(c.key) + '"><i class="ph-bold ph-copy"></i> Copy</button></div>';
+      });
+    } else {
+      for (var i = 0; i < count; i++) {
+        var raw = genKeyString();
+        keyStore.unshift({ id: 'k_' + t + '_' + i, key: raw, plan: plan, note: note, created: t, expires: t + PLANS[plan].ms, revoked: false, lastIp: '127.0.0.1', lastSeen: null, hits: 0 });
+        outHtml += '<div class="genrow"><span class="keyval">' + esc(raw) + '</span><button type="button" class="btn ghost xs" data-copy="' + esc(raw) + '"><i class="ph-bold ph-copy"></i> Copy</button></div>';
+      }
     }
     saveKeys(); $('genOut').innerHTML = outHtml; $('genNote').value = ''; toast(count + ' key(s) generated', 'ok'); renderAdminDashboard();
   });
