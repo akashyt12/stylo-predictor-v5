@@ -1,0 +1,173 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<meta name="theme-color" content="#050505">
+<title>Admin — Stylo Predictor</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link href="https://fonts.googleapis.com/css2?family=JetBrains+Mono:wght@500;700;800&family=Space+Grotesk:wght@400;500;600;700&family=Syne:wght@700;800&display=swap" rel="stylesheet">
+<link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/@phosphor-icons/web@2.1.1/src/duotone/style.css">
+<link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/@phosphor-icons/web@2.1.1/src/bold/style.css">
+<link rel="stylesheet" href="/assets/css/style.css">
+</head>
+<body>
+<div class="holo-bg"><span class="nebula n1"></span><span class="nebula n2"></span><span class="nebula n3"></span></div>
+<canvas id="holoCanvas"></canvas>
+<div class="synth-grid"></div>
+
+<!-- Admin login -->
+<main class="center" id="loginView">
+  <div class="glass card-pad auth" id="loginCard">
+    <div class="brand" style="margin-bottom:22px">
+      <span class="logo" style="background:linear-gradient(135deg,#a855f7,#38bdf8)"><svg viewBox="0 0 24 24" style="fill:#0a0612"><path d="M12 1 3 5v6c0 5 3.8 9.7 9 11 5.2-1.3 9-6 9-11V5l-9-4zm0 6a3 3 0 1 1 0 6 3 3 0 0 1 0-6z"/></svg></span>
+      <span class="name">Admin <span>Console</span></span>
+    </div>
+    <h2>Admin login</h2>
+    <p class="sub">Authorized personnel only.</p>
+    <div id="errBox" class="err hide" style="margin-bottom:14px">
+      <svg viewBox="0 0 24 24"><path d="M12 2 1 21h22L12 2zm0 5 6.5 12h-13L12 7zm-1 4v4h2v-4h-2zm0 5v2h2v-2h-2z"/></svg>
+      <span id="errMsg"></span>
+    </div>
+    <form id="adminForm" class="stack">
+      <div class="field">
+        <label>Password</label>
+        <div class="input-icon">
+          <input id="pass" class="input" type="password" autocomplete="current-password" placeholder="Enter admin password" autofocus>
+          <button type="button" class="eye" id="eye" aria-label="Toggle">
+            <svg width="18" height="18" viewBox="0 0 24 24" fill="currentColor"><path d="M12 4.5C7 4.5 2.7 7.6 1 12c1.7 4.4 6 7.5 11 7.5s9.3-3.1 11-7.5C21.3 7.6 17 4.5 12 4.5zm0 12a4.5 4.5 0 1 1 0-9 4.5 4.5 0 0 1 0 9zm0-7a2.5 2.5 0 1 0 0 5 2.5 2.5 0 0 0 0-5z"/></svg>
+          </button>
+        </div>
+      </div>
+      <button class="btn full" id="loginBtn" type="submit">Sign in</button>
+    </form>
+    <p class="small muted mt2" style="text-align:center"><a href="/login" class="muted" style="text-decoration:underline">← User login</a></p>
+  </div>
+</main>
+
+<!-- Dashboard -->
+<div id="dashView" class="hide">
+  <header class="topbar">
+    <div class="wrap">
+      <div class="brand">
+        <span class="logo" style="background:linear-gradient(135deg,#a855f7,#38bdf8)"><svg viewBox="0 0 24 24" style="fill:#0a0612"><path d="M12 1 3 5v6c0 5 3.8 9.7 9 11 5.2-1.3 9-6 9-11V5l-9-4zm0 6a3 3 0 1 1 0 6 3 3 0 0 1 0-6z"/></svg></span>
+        <span class="name hide-sm">Admin <span>Console</span></span>
+      </div>
+      <div class="top-right">
+        <span class="pill"><span class="dot"></span><span id="admOnline">0</span> online</span>
+        <button class="btn ghost sm" id="logoutBtn">Logout</button>
+      </div>
+    </div>
+  </header>
+
+  <main class="wrap main">
+    <div class="page-head">
+      <h1>Dashboard</h1>
+      <p>Generate keys, manage access and monitor live users.</p>
+    </div>
+
+    <div class="kpi-grid" id="kpis">
+      <div class="kpi g"><div class="v" id="kTotal">0</div><div class="k">Total Keys</div></div>
+      <div class="kpi b"><div class="v" id="kActive">0</div><div class="k">Active</div></div>
+      <div class="kpi g"><div class="v" id="kOnline">0</div><div class="k">Online</div></div>
+      <div class="kpi r"><div class="v" id="kExpired">0</div><div class="k">Expired</div></div>
+    </div>
+
+    <div class="admin-grid mt2">
+      <!-- Generate -->
+      <section class="glass panel">
+        <b>Generate Keys</b>
+        <p class="small muted" style="margin:4px 0 16px">Choose a plan, then create access keys.</p>
+        <form id="genForm" class="stack">
+          <div class="field">
+            <label>Plan</label>
+            <select id="plan" class="input">
+              <option value="minute">1 Minute</option>
+              <option value="hour">1 Hour</option>
+              <option value="day" selected>1 Day</option>
+              <option value="week">7 Days</option>
+              <option value="month">30 Days</option>
+              <option value="year">1 Year</option>
+            </select>
+          </div>
+          <div class="row" style="gap:12px">
+            <div class="field" style="flex:1">
+              <label>How many</label>
+              <input id="count" class="input" type="number" min="1" max="50" value="1">
+            </div>
+            <div class="field" style="flex:2">
+              <label>Note (optional)</label>
+              <input id="note" class="input" type="text" maxlength="80" placeholder="e.g. VIP user">
+            </div>
+          </div>
+          <button class="btn full" id="genBtn" type="submit">Generate Keys</button>
+        </form>
+        <div class="genout" id="genOut"></div>
+      </section>
+
+      <!-- Users -->
+      <section class="glass panel">
+        <div class="spread">
+          <b>Live Users</b>
+          <button class="btn ghost xs" id="usersRefresh">Refresh</button>
+        </div>
+        <p class="small muted" style="margin:4px 0 12px">Online = active in last 45s · IP shown for security.</p>
+        <div class="scroll" style="max-height:360px">
+          <table class="tbl">
+            <thead><tr><th>Key</th><th>Plan</th><th>IP</th><th>Seen</th><th>Status</th></tr></thead>
+            <tbody id="usersBody"><tr><td colspan="5" class="muted center-t" style="padding:20px">Loading…</td></tr></tbody>
+          </table>
+        </div>
+      </section>
+    </div>
+
+    
+    <!-- Change Admin Password -->
+    <section class="glass panel mt2">
+      <b>Change Admin Password</b>
+      <p class="small muted" style="margin:4px 0 14px">Update master password (saved as SHA-256 hash in database).</p>
+      <form id="changePassForm" class="admin-grid" style="align-items:end">
+        <div class="field">
+          <label>Current Password</label>
+          <input id="curAdminPass" class="input" type="password" autocomplete="current-password" placeholder="Current password">
+        </div>
+        <div class="row" style="gap:12px;flex-wrap:wrap;align-items:flex-end">
+          <div class="field" style="flex:1">
+            <label>New Password (min 6 chars)</label>
+            <input id="newAdminPass" class="input" type="password" autocomplete="new-password" placeholder="New password">
+          </div>
+          <div class="field" style="flex:1">
+            <label>Confirm New Password</label>
+            <input id="cfmAdminPass" class="input" type="password" autocomplete="new-password" placeholder="Confirm password">
+          </div>
+          <button class="btn" id="savePassBtn" type="submit">Update Password</button>
+        </div>
+      </form>
+    </section>
+
+    <!-- Keys -->
+    <section class="glass panel mt2">
+      <div class="spread" style="flex-wrap:wrap;gap:10px">
+        <b>All Keys</b>
+        <div class="tabs" id="keyTabs" style="margin:0">
+          <button data-f="all" class="on">All</button>
+          <button data-f="active">Active</button>
+          <button data-f="expired">Expired</button>
+          <button data-f="revoked">Revoked</button>
+        </div>
+      </div>
+      <div class="scroll mt" style="max-height:460px">
+        <table class="tbl">
+          <thead><tr><th>Key</th><th>Plan</th><th>Note</th><th>Expires</th><th>Hits</th><th>Status</th><th></th></tr></thead>
+          <tbody id="keysBody"><tr><td colspan="7" class="muted center-t" style="padding:20px">Loading…</td></tr></tbody>
+        </table>
+      </div>
+    </section>
+  </main>
+</div>
+
+<script src="/assets/js/common.js"></script>
+<script src="/assets/js/admin.js"></script>
+</body>
+</html>
